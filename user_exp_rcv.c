@@ -87,6 +87,8 @@ static u32 find_phys_blocks(struct page **, unsigned, struct tid_pageset *);
 static int set_rcvarray_entry(struct file *, unsigned long, u32,
 			      struct tid_group *, struct page **, unsigned);
 static int mmu_rb_insert(struct rb_root *, struct mmu_rb_node *);
+static void __mmu_rb_remove(struct rb_root *, struct mmu_rb_node *,
+			    struct mm_struct *, bool in_mmu, bool take_mm_sem);
 static void mmu_rb_remove(struct rb_root *, struct mmu_rb_node *,
 			  struct mm_struct *, bool in_mmu);
 static int mmu_rb_invalidate(struct rb_root *, struct mmu_rb_node *);
@@ -94,7 +96,8 @@ static int program_rcvarray(struct file *, unsigned long, struct tid_group *,
 			    struct tid_pageset *, unsigned, u16, struct page **,
 			    u32 *, unsigned *, unsigned *);
 static int unprogram_rcvarray(struct file *, u32, struct tid_group **);
-static void clear_tid_node(struct hfi1_filedata *, u16, struct tid_rb_node *);
+static void clear_tid_node(struct hfi1_filedata *fd, struct mm_struct *mm,
+			   struct tid_rb_node *node, bool take_mm_sem);
 
 static struct mmu_rb_ops tid_rb_ops = {
 	.insert = mmu_rb_insert,
@@ -879,19 +882,23 @@ static int unprogram_rcvarray(struct file *fp, u32 tidinfo,
 	node = fd->entry_to_rb[rcventry];
 	if (!node || node->rcventry != (uctxt->expected_base + rcventry))
 		return -EBADF;
-	if (HFI1_CAP_IS_USET(TID_UNMAP))
-		mmu_rb_remove(&fd->tid_rb_root, &node->mmu, NULL, false);
-	else
-		hfi1_mmu_rb_remove(&fd->tid_rb_root, &node->mmu);
 
 	if (grp)
 		*grp = node->grp;
-	clear_tid_node(fd, fd->subctxt, node);
+
+	if (HFI1_CAP_IS_USET(TID_UNMAP))
+		__mmu_rb_remove(&fd->tid_rb_root, &node->mmu, current->mm,
+				false, true);
+	else
+		hfi1_mmu_rb_remove(&fd->tid_rb_root, &node->mmu);
+
 	return 0;
 }
 
-static void clear_tid_node(struct hfi1_filedata *fd, u16 subctxt,
-			   struct tid_rb_node *node)
+static void clear_tid_node(struct hfi1_filedata *fd,
+			   struct mm_struct *mm,
+			   struct tid_rb_node *node,
+			   bool take_mm_sem)
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
@@ -909,7 +916,16 @@ static void clear_tid_node(struct hfi1_filedata *fd, u16 subctxt,
 
 	pci_unmap_single(dd->pcidev, node->dma_addr, node->mmu.len,
 			 PCI_DMA_FROMDEVICE);
-	hfi1_release_user_pages(current->mm, node->pages, node->npages, true);
+	hfi1_release_user_pages(NULL, node->pages, node->npages, true);
+
+	if (take_mm_sem)
+		down_write(&mm->mmap_sem);
+
+	mm->pinned_vm -= node->npages;
+
+	if (take_mm_sem)
+		up_write(&mm->mmap_sem);
+
 	fd->tid_n_pinned -= node->npages;
 
 	node->grp->used--;
@@ -945,12 +961,11 @@ static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
 				if (!node || node->rcventry != rcventry)
 					continue;
 				if (HFI1_CAP_IS_USET(TID_UNMAP))
-					mmu_rb_remove(&fd->tid_rb_root,
-						      &node->mmu, NULL, false);
+					__mmu_rb_remove(&fd->tid_rb_root, &node->mmu,
+							current->mm, false, true);
 				else
 					hfi1_mmu_rb_remove(&fd->tid_rb_root,
 							   &node->mmu);
-				clear_tid_node(fd, -1, node);
 			}
 		}
 	}
@@ -1012,8 +1027,8 @@ static int mmu_rb_insert(struct rb_root *root, struct mmu_rb_node *node)
 	return 0;
 }
 
-static void mmu_rb_remove(struct rb_root *root, struct mmu_rb_node *node,
-			  struct mm_struct *mm, bool in_mmu)
+static void __mmu_rb_remove(struct rb_root *root, struct mmu_rb_node *node,
+			    struct mm_struct *mm, bool in_mmu, bool take_mm_sem)
 {
 	struct hfi1_filedata *fdata =
 		container_of(root, struct hfi1_filedata, tid_rb_root);
@@ -1022,4 +1037,11 @@ static void mmu_rb_remove(struct rb_root *root, struct mmu_rb_node *node,
 	u32 base = fdata->uctxt->expected_base;
 
 	fdata->entry_to_rb[tnode->rcventry - base] = NULL;
+	clear_tid_node(fdata, mm, tnode, take_mm_sem);
+}
+
+static void mmu_rb_remove(struct rb_root *root, struct mmu_rb_node *node,
+			  struct mm_struct *mm, bool in_mmu)
+{
+	__mmu_rb_remove(root, node, mm, in_mmu, false);
 }
