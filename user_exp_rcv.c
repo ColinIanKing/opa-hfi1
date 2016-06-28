@@ -858,8 +858,8 @@ static int set_rcvarray_entry(struct file *fp, unsigned long vaddr,
 static int unprogram_rcvarray(struct file *fp, u32 tidinfo,
 			      struct tid_group **grp)
 {
-	struct hfi1_filedata *fdata = fp->private_data;
-	struct hfi1_ctxtdata *uctxt = fdata->uctxt;
+	struct hfi1_filedata *fd = fp->private_data;
+	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
 	struct tid_rb_node *node;
 	u8 tidctrl = EXP_TID_GET(tidinfo, CTRL);
@@ -876,27 +876,27 @@ static int unprogram_rcvarray(struct file *fp, u32 tidinfo,
 
 	rcventry = tididx + (tidctrl - 1);
 
-	node = fdata->entry_to_rb[rcventry];
+	node = fd->entry_to_rb[rcventry];
 	if (!node || node->rcventry != (uctxt->expected_base + rcventry))
 		return -EBADF;
 	if (HFI1_CAP_IS_USET(TID_UNMAP))
-		mmu_rb_remove(&fdata->tid_rb_root, &node->mmu, NULL);
+		mmu_rb_remove(&fd->tid_rb_root, &node->mmu, NULL);
 	else
-		hfi1_mmu_rb_remove(&fdata->tid_rb_root, &node->mmu);
+		hfi1_mmu_rb_remove(&fd->tid_rb_root, &node->mmu);
 
 	if (grp)
 		*grp = node->grp;
-	clear_tid_node(fdata, fdata->subctxt, node);
+	clear_tid_node(fd, fd->subctxt, node);
 	return 0;
 }
 
-static void clear_tid_node(struct hfi1_filedata *fdata, u16 subctxt,
+static void clear_tid_node(struct hfi1_filedata *fd, u16 subctxt,
 			   struct tid_rb_node *node)
 {
-	struct hfi1_ctxtdata *uctxt = fdata->uctxt;
+	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
 
-	trace_hfi1_exp_tid_unreg(uctxt->ctxt, fdata->subctxt, node->rcventry,
+	trace_hfi1_exp_tid_unreg(uctxt->ctxt, fd->subctxt, node->rcventry,
 				 node->npages, node->mmu.addr, node->phys,
 				 node->dma_addr);
 
@@ -910,7 +910,7 @@ static void clear_tid_node(struct hfi1_filedata *fdata, u16 subctxt,
 	pci_unmap_single(dd->pcidev, node->dma_addr, node->mmu.len,
 			 PCI_DMA_FROMDEVICE);
 	hfi1_release_user_pages(current->mm, node->pages, node->npages, true);
-	fdata->tid_n_pinned -= node->npages;
+	fd->tid_n_pinned -= node->npages;
 
 	node->grp->used--;
 	node->grp->map &= ~(1 << (node->rcventry - node->grp->base));
@@ -928,7 +928,7 @@ static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
 			    struct exp_tid_set *set, struct rb_root *root)
 {
 	struct tid_group *grp, *ptr;
-	struct hfi1_filedata *fdata = container_of(root, struct hfi1_filedata,
+	struct hfi1_filedata *fd = container_of(root, struct hfi1_filedata,
 						tid_rb_root);
 	int i;
 
@@ -940,17 +940,17 @@ static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
 				u16 rcventry = grp->base + i;
 				struct tid_rb_node *node;
 
-				node = fdata->entry_to_rb[rcventry -
+				node = fd->entry_to_rb[rcventry -
 							  uctxt->expected_base];
 				if (!node || node->rcventry != rcventry)
 					continue;
 				if (HFI1_CAP_IS_USET(TID_UNMAP))
-					mmu_rb_remove(&fdata->tid_rb_root,
+					mmu_rb_remove(&fd->tid_rb_root,
 						      &node->mmu, NULL);
 				else
-					hfi1_mmu_rb_remove(&fdata->tid_rb_root,
+					hfi1_mmu_rb_remove(&fd->tid_rb_root,
 							   &node->mmu);
-				clear_tid_node(fdata, -1, node);
+				clear_tid_node(fd, -1, node);
 			}
 		}
 	}
